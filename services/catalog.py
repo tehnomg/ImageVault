@@ -9,6 +9,17 @@ from database.db import utcnow
 
 log = logging.getLogger("imagevault.catalog")
 
+
+def _root_paths_overlap(a: str, b: str) -> bool:
+    """True when either registered root is equal to or inside the other."""
+    a, b = path_key(a), path_key(b)
+
+    def contains(parent: str, child: str) -> bool:
+        return not parent or child == parent or child.startswith(parent + "/")
+
+    return contains(a, b) or contains(b, a)
+
+
 class CatalogService:
     """Единый сервисный слой: Web UI, REST и (позже) MCP вызывают только его."""
     def __init__(self, db, cfg):
@@ -28,18 +39,30 @@ class CatalogService:
         v = repo.get_volume(conn, vid)
         if not v:
             raise ServiceError("not_found", "volume not found")
-        rel = (relative_path or "").replace("\\", "/").strip("/")
-        if rel:
-            p = safe_join(Path(v["anchor"]), rel)
+        raw = (relative_path or "").replace("\\", "/")
+        if raw:
+            p = safe_join(Path(v["anchor"]), raw)
             if not p.is_dir():
                 raise ServiceError("bad_request", f"not a directory: {relative_path}")
-        for r in repo.list_roots(conn, vid):
-            if path_key(r["relative_path"]) == path_key(rel):
+            rel = "/".join(part for part in raw.split("/") if part not in ("", "."))
+        else:
+            rel = ""
+
+        roots = repo.list_roots(conn, vid)
+        for r in roots:
+            existing = r["relative_path"]
+            if path_key(existing) == path_key(rel):
                 return r
+            if _root_paths_overlap(existing, rel):
+                raise ServiceError(
+                    "conflict",
+                    f"root overlaps an existing registered root: {existing or '.'}",
+                )
+
         rid = repo.insert_root(conn, vid, rel)
         return repo.get_root(conn, rid)
 
-    def list_roots(self, vid): return repo.list_roots(self.db.conn(), vid)
+    def list_roots(self, vid): return repo.list_roots(self.db.conn())
 
     def request_scan(self, root_id) -> str:
         conn = self.db.conn()
