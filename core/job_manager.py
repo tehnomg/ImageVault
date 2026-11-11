@@ -3,6 +3,8 @@ import json, logging, os, threading
 from database import repository as repo
 
 log = logging.getLogger("imagevault.jobs")
+CLAIM_RETRY_INITIAL = 0.25
+CLAIM_RETRY_MAX = 5.0
 
 class JobCancelled(Exception):
     pass
@@ -74,12 +76,27 @@ class JobManager:
     def is_paused(self) -> bool: return bool(repo.get_setting(self.db.conn(), "queue_paused", False))
 
     def _loop(self, worker: str):
-        conn = self.db.conn()
+        retry_delay = CLAIM_RETRY_INITIAL
         while not self._stop.is_set():
-            if self.is_paused():
-                self._stop.wait(0.5)
+            try:
+                if self.is_paused():
+                    self._stop.wait(0.5)
+                    continue
+                # Resolve the thread-local connection inside the retry boundary:
+                # connection creation and claim_job can both fail transiently.
+                conn = self.db.conn()
+                job = repo.claim_job(conn, worker)
+            except Exception:
+                log.exception(
+                    "worker %s failed while polling job queue; retrying in %.2fs",
+                    worker, retry_delay,
+                )
+                self._stop.wait(retry_delay)
+                retry_delay = min(retry_delay * 2, CLAIM_RETRY_MAX)
                 continue
-            job = repo.claim_job(conn, worker)
+
+            # Any successful queue poll (including an empty queue) resets backoff.
+            retry_delay = CLAIM_RETRY_INITIAL
             if job is None:
                 self._stop.wait(0.4)
                 continue
