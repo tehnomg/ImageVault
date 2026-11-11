@@ -62,7 +62,7 @@ class CatalogService:
         rid = repo.insert_root(conn, vid, rel)
         return repo.get_root(conn, rid)
 
-    def list_roots(self, vid): return repo.list_roots(self.db.conn())
+    def list_roots(self, vid): return repo.list_roots(self.db.conn(), vid)
 
     def request_scan(self, root_id) -> str:
         conn = self.db.conn()
