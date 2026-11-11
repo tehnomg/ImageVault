@@ -98,7 +98,7 @@ def test_nested_root_rejected_when_parent_exists(client, sample):
         json={"relative_path": child},
     )
     assert response.status_code == 409, response.text
-    assert "overlaps" in response.json()["detail"]
+    assert "overlaps" in response.json()["message"]
 
 
 def test_parent_root_rejected_when_nested_root_exists(client, sample):
@@ -152,7 +152,7 @@ def test_volume_root_overlaps_every_nested_root(client, sample):
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows case-insensitivity")
 def test_nested_root_rejected_case_insensitively(client, sample):
-    (sample / "Photos").mkdir()
+    (sample / "Photos" / "subfolder").mkdir(parents=True)
     vid, parent = _volume_base_rel(client, sample)
     first = client.post(
         f"/api/volumes/{vid}/roots",
@@ -164,3 +164,16 @@ def test_nested_root_rejected_case_insensitively(client, sample):
         json={"relative_path": f"{parent}/photos/subfolder".lstrip("/")},
     )
     assert response.status_code == 409, response.text
+
+
+
+def test_list_roots_passes_volume_id_to_repository(client, monkeypatch):
+    captured = {}
+
+    def fake_list_roots(conn, vid=None):
+        captured["vid"] = vid
+        return []
+
+    monkeypatch.setattr("services.catalog.repo.list_roots", fake_list_roots)
+    assert client.app.state.catalog.list_roots("volume-123") == []
+    assert captured["vid"] == "volume-123"
