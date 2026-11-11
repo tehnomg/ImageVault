@@ -1,0 +1,344 @@
+# Этап принят: граница зарегистрированного root для symlink/junction
+
+## 0. Важное об ограничении этого хода
+
+Инструменты исполнения и веба в этом ходе **недоступны** (`code_interpreter` и `web_extractor` отвечают «Tool does not exists»). Поэтому я **не могу** сейчас клонировать репозиторий, запустить `pytest`, проверить CI или запушить. Патч построен против **точного снимка `main`, прочитанного в аудите** (HEAD `c541481ef`, «Update scanner.py»). **Тесты я не запускал** и не выдаю их за пройденные. Ниже — план, минимальный diff, новый тестовый файл, Windows-CI и команды; финальное условие («файл в репо + оба CI зелёные») выполняешь ты. Если вернёшь sandbox — склонирую, прогоню полный набор и дам верифицированный diff.
+
+---
+
+## 1. План и точный список файлов
+
+Меняются **ровно 3 файла**, ничего больше (job_manager, SQL, alias-эвристика и прочие P2/P3 не трогаются):
+
+| Файл | Изменение |
+|---|---|
+| `core/scanner.py` | 2 маленьких хелпера (`_canonical`, `_is_within`); `root_real`; шлюз границы для ссылок при `follow=True`; симметрия `follow=False`; удаление мёртвого `rel.startswith("..")`. |
+| `tests/test_link_boundary.py` | **новый** — POSIX symlink + Windows junction, граница root, циклы, битые ссылки, ошибка доступа, регрессия `follow=False`. |
+| `.github/workflows/main.yml` | матрица `ubuntu-latest` + `windows-latest`, Python 3.13, `fail-fast: false`. |
+
+Как закрыты 9 требований:
+
+1. **Граница = registered root.** `root_real = _canonical(root_abs)`, где `root_abs` — именно сканируемый root (не якорь тома).
+2. **Файлы и каталоги.** Шлюз стоит **до** веток `is_dir`/`is_file` → блокирует оба типа ссылок наружу.
+3. **Внутри root разрешено.** `_is_within(target, root_real)` через `commonpath` (не `startswith`, защита от `/root-evil`);inside-ссылки проходят и обходятся.
+4. **Циклы/повторы сохранены.** `visited` по `(st_dev, st_ino)` цели (`st_eff = os.stat`) не тронут.
+5. **Симметрия `follow=False`.** Ветка改為 `if (is_reparse or is_symlink) and not follow:` и записывает ссылку (каталог **или файл**) в `skipped_dirs` → ранее проиндексированные записи не становятся ложными missing на POSIX так же, как на Windows.
+6. **Canonical Windows 3.13 без снятия префиксов.** `_canonical = os.path.normcase(os.path.realpath(p))` применяется **симметрично** к цели и корню. Префиксы `\\?\` / `\\?\UNC\` **вручную не снимаются**: `realpath` на Windows (3.8+, включая 3.13) сам приводит к согласованной форме через `GetFinalPathNameByHandleW(VOLUME_NAME_DOS)`; согласованность подтверждается **Windows-CI junction-тестом**. Если CI покажет расхождение форм (например, volume-GUID у цели без буквы диска) — правим по факту, а не наугад.
+7. **Мёртвая проверка удалена.** После шлюза неб链接-записи не могут выйти за root, `rel.startswith("..")` избыточен.
+8. **Тесты POSIX + Windows junction** — ниже; junction создаётся через `_winapi.CreateJunction` **без привилегий** → реально исполняется на Windows-CI.
+9. **Windows job** добавлен.
+
+---
+
+## 2. Полный diff
+
+### 2.1 `core/scanner.py` (применять с `--recount`; база `c541481ef`)
+
+```diff
+diff --git a/core/scanner.py b/core/scanner.py
+--- a/core/scanner.py
++++ b/core/scanner.py
+@@
+ def _under(key: str, prefix_key: str) -> bool:
+     return key == prefix_key or key.startswith(prefix_key + "/")
+ 
++def _canonical(path) -> str:
++    # Симметричная canonicalization цели и корня. Префиксы \\?\ / \\?\UNC\ НЕ
++    # снимаем вручную: os.path.realpath на Windows Python 3.13 сам приводит к
++    # согласованной форме; согласованность проверяется Windows-CI (junction).
++    return os.path.normcase(os.path.realpath(path))
++
++def _is_within(target: str, base: str) -> bool:
++    # Обе строки уже canonical. commonpath, а не startswith (защита от /root-evil);
++    # разные диски на Windows -> ValueError -> считаем "снаружи".
++    try:
++        return os.path.commonpath([target, base]) == base
++    except ValueError:
++        return False
++
+ def scan_root(db, cfg, volume: dict, root: dict, ctx) -> dict:
+@@
+     data_norm = os.path.normcase(str(cfg.data_dir.resolve()))
++    root_real = _canonical(root_abs)
+     stats = {"files": 0, "new": 0, "changed": 0, "corrupt": 0, "missing": 0}
+@@
+             attrs = getattr(st, "st_file_attributes", 0)
+             is_reparse = bool(attrs & REPARSE)
+             is_symlink = entry.is_symlink()
+-            if is_reparse and not follow:
+-                if entry.is_dir(follow_symlinks=False):
+-                    skipped_dirs.append(rel_of(entry.path))
+-                continue
++            is_link = is_reparse or is_symlink
++            if is_link and not follow:
++                # Симметрично POSIX symlink / Windows reparse: запоминаем ссылку
++                # (каталог или файл), чтобы ранее проиндексированные записи не
++                # становились ложными missing при follow_symlinks=False.
++                skipped_dirs.append(rel_of(entry.path))
++                continue
++            if is_link and follow:
++                rel_l = rel_of(entry.path)
++                try:
++                    target = _canonical(entry.path)
++                except (OSError, ValueError) as e:
++                    skipped_dirs.append(rel_l)
++                    log.warning("cannot resolve link %s: %s; skipped", entry.path, e)
++                    continue
++                if not _is_within(target, root_real):
++                    skipped_dirs.append(rel_l)
++                    log.warning("link escapes registered root, skipped: %s -> %s",
++                                entry.path, target)
++                    continue
+             try:
+                 st_eff = os.stat(entry.path) if (is_reparse or is_symlink) else st
+@@
+                 rel = rel_of(entry.path)
+-                if rel.startswith(".."):
+-                    skipped_dirs.append(rel_of(entry.path))  # symlink наружу тома
+-                    continue
+                 seen.add(path_key(rel))
+```
+
+### 2.2 `tests/test_link_boundary.py` (новый файл)
+
+```diff
+diff --git a/tests/test_link_boundary.py b/tests/test_link_boundary.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_link_boundary.py
+@@ -0,0 +1 @@
++"""Граница зарегистрированного root для symlink/junction (core/scanner.py).
++
++Граница = сканируемый root (не физический том). Кроссплатформенно проверяется
++выход за пределы root; на Windows дополнительно исполняются junction-тесты
++(CreateJunction не требует привилегий). Symlink-тесты пропускаются, если создание
++ссылок недоступно (например, Windows без SeCreateSymbolicLinkPrivilege).
++"""
++import json
++import os
++
++import pytest
++from PIL import Image
++
++from tests.util import register_and_scan, rescan, wait_idle
++
++
++def _mkimg(path):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    Image.new("RGB", (32, 32), (10, 120, 200)).save(path)
++
++
++def _symlink(target, link, is_dir=True):
++    try:
++        os.symlink(target, link, target_is_directory=is_dir)
++    except (OSError, NotImplementedError) as e:
++        pytest.skip(f"symlink creation unavailable on this platform: {e}")
++
++
++def _junction(target, link):
++    if os.name != "nt":
++        pytest.skip("junction is a Windows-only NTFS reparse point")
++    import _winapi
++    try:
++        _winapi.CreateJunction(str(target), str(link))
++    except (OSError, AttributeError) as e:
++        pytest.skip(f"junction creation unavailable: {e}")
++
++
++def _items(client):
++    return client.get("/api/images", params={"page_size": 200}).json()["items"]
++
++
++def _rels(client):
++    return {i["relative_path"] for i in _items(client)}
++
++
++def _names(client):
++    return {i["filename"] for i in _items(client)}
++
++
++def _has_suffix(rels, suffix):
++    return any(r.endswith(suffix) for r in rels)
++
++
++def test_plain_subdir_scanned(client, sample):
++    _mkimg(sample / "plain" / "p.png")
++    register_and_scan(client, sample)
++    assert _has_suffix(_rels(client), "plain/p.png")
++
++
++def test_symlink_dir_inside_root_followed(client, sample):
++    # Цель внутри root, но в исключённом dot-каталоге: единственный путь — ссылка.
++    _mkimg(sample / ".store" / "inside.png")
++    _symlink(sample / ".store", sample / "link_in")
++    client.app.state.cfg.follow_symlinks = True
++    register_and_scan(client, sample)
++    assert _has_suffix(_rels(client), "link_in/inside.png")
++
++
++def test_symlink_dir_outside_root_skipped(client, sample, tmp_path):
++    outside = tmp_path / "outside"
++    _mkimg(outside / "secret.png")
++    _symlink(outside, sample / "link_out")
++    client.app.state.cfg.follow_symlinks = True
++    register_and_scan(client, sample)
++    assert "secret.png" not in _names(client)
++    assert not _has_suffix(_rels(client), "link_out/secret.png")
++    assert len(_items(client)) == 12
++
++
++def test_symlink_file_outside_root_skipped(client, sample, tmp_path):
++    outside = tmp_path / "outside_f"
++    _mkimg(outside / "fsecret.png")
++    _symlink(outside / "fsecret.png", sample / "f_link.png", is_dir=False)
++    client.app.state.cfg.follow_symlinks = True
++    register_and_scan(client, sample)
++    names = _names(client)
++    assert "fsecret.png" not in names
++    assert "f_link.png" not in names
++
++
++def test_junction_dir_outside_root_skipped(client, sample, tmp_path):
++    outside = tmp_path / "outside_j"
++    _mkimg(outside / "jsecret.png")
++    _junction(outside, sample / "junc_out")
++    client.app.state.cfg.follow_symlinks = True
++    register_and_scan(client, sample)
++    assert "jsecret.png" not in _names(client)
++    assert not _has_suffix(_rels(client), "junc_out/jsecret.png")
++
++
++def test_junction_dir_inside_root_followed(client, sample):
++    _mkimg(sample / ".store" / "jinside.png")
++    _junction(sample / ".store", sample / "junc_in")
++    client.app.state.cfg.follow_symlinks = True
++    register_and_scan(client, sample)
++    assert _has_suffix(_rels(client), "junc_in/jinside.png")
++
++
++def test_parent_link_no_infinite_walk(client, sample):
++    _mkimg(sample / "sub" / "s.png")
++    _symlink(sample, sample / "sub" / "up")
++    client.app.state.cfg.follow_symlinks = True
++    register_and_scan(client, sample)  # wait_idle ограничит время при зацикливании
++    rels = _rels(client)
++    assert _has_suffix(rels, "sub/s.png")
++    assert not any("sub/up/" in r for r in rels)
++    assert len(_items(client)) == 13
++
++
++def test_broken_link_does_not_break_scan(client, sample):
++    _symlink(sample / "no_such_dir", sample / "broken_link")
++    client.app.state.cfg.follow_symlinks = True
++    register_and_scan(client, sample)
++    assert len(_items(client)) == 12
++
++
++def test_follow_false_no_false_missing(client, sample, tmp_path):
++    # Регрессия требования 5: записи, индексированные через ссылку при follow=True,
++    # не должны становиться missing после переключения на follow=False (POSIX+Win).
++    _mkimg(sample / ".store" / "inside.png")
++    _mkimg(sample / ".store" / "f.png")
++    _symlink(sample / ".store", sample / "link_in")
++    _symlink(sample / ".store" / "f.png", sample / "f_link_in", is_dir=False)
++    outside = tmp_path / "outside_t"
++    _mkimg(outside / "o.png")
++    _symlink(outside, sample / "link_out")
++    client.app.state.cfg.follow_symlinks = True
++    vid, _ = register_and_scan(client, sample)
++    assert _has_suffix(_rels(client), "link_in/inside.png")
++    assert "f_link_in" in _names(client)
++    assert "o.png" not in _names(client)
++    client.app.state.cfg.follow_symlinks = False
++    rescan(client, vid)
++    rows = {i["relative_path"]: i["scan_status"] for i in _items(client)}
++    assert any(r.endswith("link_in/inside.png") and s != "missing" for r, s in rows.items())
++    assert any(r.endswith("f_link_in") and s != "missing" for r, s in rows.items())
++    assert "o.png" not in _names(client)
++
++
++def test_access_error_no_false_missing(client, sample, monkeypatch):
++    import core.scanner as scanner_mod
++    _mkimg(sample / ".restricted" / "r.png")
++    _symlink(sample / ".restricted", sample / "link_r")
++    client.app.state.cfg.follow_symlinks = True
++    vid, _ = register_and_scan(client, sample)
++    assert _has_suffix(_rels(client), "link_r/r.png")
++    target_real = os.path.normcase(os.path.realpath(sample / ".restricted"))
++    real_scandir = os.scandir
++
++    def fake_scandir(p):
++        if isinstance(p, int):
++            return real_scandir(p)
++        if os.path.normcase(os.path.realpath(p)) == target_real:
++            raise PermissionError("denied")
++        return real_scandir(p)
++
++    monkeypatch.setattr(scanner_mod.os, "scandir", fake_scandir)
++    jid = rescan(client, vid)
++    job = client.get(f"/api/jobs/{jid}").json()
++    assert json.loads(job["result_json"])["missing_check"] == "skipped_incomplete_walk"
++    row = next(i for i in _items(client) if i["relative_path"].endswith("link_r/r.png"))
++    assert row["scan_status"] != "missing"
+```
+
+### 2.3 `.github/workflows/main.yml` (полная замена файла)
+
+```yaml
+name: Python CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m pytest tests -q
+```
+
+---
+
+## 3. Локальный прогон и матрица исполнения (команды для тебя)
+
+```bat
+git apply --recount --check 04-root-boundary.patch
+git apply --recount 04-root-boundary.patch
+:: workflow замени целиком содержимым выше
+python -m pytest tests -q
+```
+
+Ожидаемая матрица **нового** файла (фактические skip зависят от привилегий symlink на Windows-раннере):
+
+| Тест | Linux CI | Windows CI |
+|---|---|---|
+| plain / inside / outside / file-outside / parent / broken / follow-false / access-error (symlink) | RUN | RUN при наличии привилегии symlink, иначе SKIP |
+| `test_junction_dir_outside_root_skipped` | SKIP (non-Windows) | **RUN** (CreateJunction без привилегий) |
+| `test_junction_dir_inside_root_followed` | SKIP (non-Windows) | **RUN** |
+
+Существующие: `test_windows_case_insensitive_roots` — RUN только на Windows; `test_marker_identity_after_move` / `test_marker_clone_conflict` — RUN только на POSIX. Junction-тесты гарантируют, что Windows-специфика **реально исполняется** в CI, а не пропускается.
+
+---
+
+## 4. Статус
+
+**НЕ завершено.** Новый файл ещё не в репозитории, CI не запускался, локальный прогон в этом ходе невозможен (инструменты недоступны). Условие завершения — `tests/test_link_boundary.py` в `main` **и** оба job (ubuntu + windows) зелёные.
+
+Что нужно от тебя: применить патч, прогнать `pytest` локально (пришли вывод, особенно падения и skip-лист), запушить и прислать результат обоих CI-job. Если `git apply --check` сообщит о конфликте (твой `scanner.py` отличается от снимка `c541481ef`) — не форсируй, пришли текущий файл, пересоберу diff. Если вернёшь sandbox — сам склонирую, прогоню полный набор и дам верифицированный результат. К следующему этапу не перехожу.
