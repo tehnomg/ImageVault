@@ -1,0 +1,6 @@
+# ImageVault — Этапы 0–1. Этап 2 добавит numpy + opencv-python-headless.
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0
+pillow>=10.4
+httpx>=0.27
+pytest>=8.0
