@@ -79,7 +79,7 @@ def _volume_base_rel(client, sample):
     base_rel = os.path.relpath(
         os.path.realpath(sample),
         os.path.realpath(volume["anchor"]),
-    ).replace("\\\\", "/")
+    ).replace("\\", "/")
     return volume["id"], "" if base_rel == "." else base_rel.strip("/")
 
 
@@ -147,4 +147,20 @@ def test_volume_root_overlaps_every_nested_root(client, sample):
     first = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": ""})
     assert first.status_code == 200, first.text
     response = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": child})
+    assert response.status_code == 409, response.text
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows case-insensitivity")
+def test_nested_root_rejected_case_insensitively(client, sample):
+    (sample / "Photos").mkdir()
+    vid, parent = _volume_base_rel(client, sample)
+    first = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": f"{parent}/Photos".lstrip("/")},
+    )
+    assert first.status_code == 200, first.text
+    response = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": f"{parent}/photos/subfolder".lstrip("/")},
+    )
     assert response.status_code == 409, response.text
