@@ -316,29 +316,26 @@ jobs:
 
 ---
 
-## 3. Локальный прогон и матрица исполнения (команды для тебя)
+## 3. Уточнение реализации после проверки Python 3.13 / Windows
 
-```bat
-git apply --recount --check 04-root-boundary.patch
-git apply --recount 04-root-boundary.patch
-:: workflow замени целиком содержимым выше
-python -m pytest tests -q
-```
+При переносе патча обнаружена ещё одна важная Windows-особенность, которую исходный вариант не учитывал:
 
-Ожидаемая матрица **нового** файла (фактические skip зависят от привилегий symlink на Windows-раннере):
+- `os.DirEntry.stat()` на Windows не гарантирует корректные `st_dev` и `st_ino`;
+- текущий cycle guard использует именно эту пару для обычных каталогов;
+- в результате несколько соседних каталогов могут получить одинаковую пару и часть дерева будет ошибочно пропущена.
 
-| Тест | Linux CI | Windows CI |
-|---|---|---|
-| plain / inside / outside / file-outside / parent / broken / follow-false / access-error (symlink) | RUN | RUN при наличии привилегии symlink, иначе SKIP |
-| `test_junction_dir_outside_root_skipped` | SKIP (non-Windows) | **RUN** (CreateJunction без привилегий) |
-| `test_junction_dir_inside_root_followed` | SKIP (non-Windows) | **RUN** |
+Поэтому в итоговом изменении для Windows обычные каталоги также получают `st_eff` через `os.stat(entry.path)`. Для ссылок `os.stat()` используется на обеих платформах, чтобы получить статистику цели. Добавлен отдельный тест с двумя соседними подкаталогами — он проверяет не только ссылочную границу, но и полноценный обход нескольких ветвей на Windows.
 
-Существующие: `test_windows_case_insensitive_roots` — RUN только на Windows; `test_marker_identity_after_move` / `test_marker_clone_conflict` — RUN только на POSIX. Junction-тесты гарантируют, что Windows-специфика **реально исполняется** в CI, а не пропускается.
+Документация Python 3.13 указывает, что Windows `DirEntry.stat()` возвращает нулевые `st_dev`/`st_ino`; для получения этих значений требуется `os.stat()`. `os.path.realpath()` разрешает symlink и junction на Windows начиная с Python 3.8. См. [Python 3.13 os](https://docs.python.org/3.13/library/os.html) и [Python 3.13 os.path](https://docs.python.org/3.13/library/os.path.html).
 
----
+## 4. Фактическое состояние внесения
 
-## 4. Статус
+Подготовлена реализация в отдельной ветке, без прямой записи в `main`:
 
-**НЕ завершено.** Новый файл ещё не в репозитории, CI не запускался, локальный прогон в этом ходе невозможен (инструменты недоступны). Условие завершения — `tests/test_link_boundary.py` в `main` **и** оба job (ubuntu + windows) зелёные.
+- `core/scanner.py` — canonical boundary check по зарегистрированному root; блокировка внешних ссылок на файлы и каталоги; симметричная обработка `follow_symlinks=False`; исправлен Windows inode/device для обычных каталогов.
+- `tests/test_link_boundary.py` — новый набор регрессионных тестов: обычные соседние каталоги, внутренние/внешние symlink, внешняя ссылка на файл, junction внутрь/наружу, цикл, битая ссылка, переключение follow.
+- `.github/workflows/main.yml` — матрица Ubuntu + Windows, Python 3.13.
 
-Что нужно от тебя: применить патч, прогнать `pytest` локально (пришли вывод, особенно падения и skip-лист), запушить и прислать результат обоих CI-job. Если `git apply --check` сообщит о конфликте (твой `scanner.py` отличается от снимка `c541481ef`) — не форсируй, пришли текущий файл, пересоберу diff. Если вернёшь sandbox — сам склонирую, прогоню полный набор и дам верифицированный результат. К следующему этапу не перехожу.
+**Статус проверки:** исходники изменены, но локальный pytest и GitHub Actions ещё не запускались. Поэтому этап не считается завершённым. Сначала нужно получить полный зелёный CI на обеих ОС; если Windows job упадёт, разбирать конкретную ошибку, не отключая соответствующий тест.
+
+Остальные P2/P3 из аудита не включены: job manager, SQL batching, пересекающиеся корни, alias эвристика, pruning и HTTPS остаются отдельными задачами.
