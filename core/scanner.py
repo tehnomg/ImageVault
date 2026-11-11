@@ -15,6 +15,20 @@ REPARSE, HIDDEN = 0x400, 0x2
 def _under(key: str, prefix_key: str) -> bool:
     return key == prefix_key or key.startswith(prefix_key + "/")
 
+
+def _canonical(path) -> str:
+    """Resolve links and normalize paths identically on both sides of a boundary check."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _is_within(target: str, base: str) -> bool:
+    """Return whether canonical target is base itself or a descendant of base."""
+    try:
+        return os.path.commonpath([target, base]) == base
+    except ValueError:
+        # Different Windows drives (or incompatible path roots) are outside.
+        return False
+
 def scan_root(db, cfg, volume: dict, root: dict, ctx) -> dict:
     conn = db.conn()
     anchor = Path(volume["anchor"])
@@ -29,6 +43,8 @@ def scan_root(db, cfg, volume: dict, root: dict, ctx) -> dict:
     excl = (DEFAULT_EXCLUDE | {n.lower() for n in cfg.extra_exclude_dirs}
             | {n.lower() for n in json.loads(root["exclusions_json"] or "[]")})
     data_norm = os.path.normcase(str(cfg.data_dir.resolve()))
+    # The security boundary is the registered root, not the physical volume anchor.
+    root_real = _canonical(root_abs)
     stats = {"files": 0, "new": 0, "changed": 0, "corrupt": 0, "missing": 0}
     seen: set[str] = set()
     walk_errors: list[str] = []
@@ -56,21 +72,39 @@ def scan_root(db, cfg, volume: dict, root: dict, ctx) -> dict:
             attrs = getattr(st, "st_file_attributes", 0)
             is_reparse = bool(attrs & REPARSE)
             is_symlink = entry.is_symlink()
-            if is_reparse and not follow:
-                if entry.is_dir(follow_symlinks=False):
-                    skipped_dirs.append(rel_of(entry.path))
+            is_link = is_reparse or is_symlink
+            if is_link and not follow:
+                # Preserve prior catalog rows for both directory and file links.
+                skipped_dirs.append(rel_of(entry.path))
                 continue
             try:
-                st_eff = os.stat(entry.path) if (is_reparse or is_symlink) else st
                 is_dir = entry.is_dir(follow_symlinks=follow)
                 is_file = entry.is_file(follow_symlinks=follow)
+                # DirEntry.stat() does not provide usable st_dev/st_ino on Windows.
+                # Fetch a real stat for directories there so the cycle guard works
+                # across multiple sibling directories, not just for the first one.
+                st_eff = os.stat(entry.path) if (is_link or (os.name == "nt" and is_dir)) else st
             except FileNotFoundError:
-                skipped_dirs.append(rel_of(entry.path))  # битая ссылка — не ошибка обхода
+                skipped_dirs.append(rel_of(entry.path))  # broken link: do not mark old rows missing
                 continue
             except OSError as e:
                 walk_errors.append(rel_of(entry.path))
                 log.warning("cannot access %s: %s", entry.path, e)
                 continue
+
+            if is_link and follow:
+                rel_link = rel_of(entry.path)
+                try:
+                    target_real = _canonical(entry.path)
+                except (OSError, ValueError) as e:
+                    skipped_dirs.append(rel_link)
+                    log.warning("cannot resolve link %s: %s; skipped", entry.path, e)
+                    continue
+                if not _is_within(target_real, root_real):
+                    skipped_dirs.append(rel_link)
+                    log.warning("link escapes registered root, skipped: %s -> %s",
+                                entry.path, target_real)
+                    continue
             if is_dir:
                 name = entry.name
                 rel_d = rel_of(entry.path)
@@ -95,9 +129,6 @@ def scan_root(db, cfg, volume: dict, root: dict, ctx) -> dict:
                 if ext not in image_loader.IMAGE_EXTS:
                     continue
                 rel = rel_of(entry.path)
-                if rel.startswith(".."):
-                    skipped_dirs.append(rel_of(entry.path))  # symlink наружу тома
-                    continue
                 seen.add(path_key(rel))
                 try:
                     _process_file(db, cfg, volume, rel, entry, st_eff, stats)
