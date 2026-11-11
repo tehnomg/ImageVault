@@ -111,7 +111,17 @@ def scan_root(db, cfg, volume: dict, root: dict, ctx) -> dict:
         log.warning("missing-check skipped: %d access errors under root %s",
                     len(walk_errors), root_abs)
     else:
-        skip_keys = [path_key(s) for s in skipped_dirs]
+        skip_keys = []
+        for skipped in skipped_dirs:
+            skip_keys.append(path_key(skipped))
+
+            # A directory may have been renamed to a hidden name.
+            # Preserve catalog entries from its previous non-hidden path.
+            parts = skipped.rsplit("/", 1)
+            name = parts[-1]
+            if name.startswith(".") and len(name) > 1:
+                alias = (parts[0] + "/" if len(parts) == 2 else "") + name[1:]
+                skip_keys.append(path_key(alias))
         pkey = path_key(prefix)
         for row in repo.images_under_root(conn, volume["id"]):
             k = path_key(row["relative_path"])

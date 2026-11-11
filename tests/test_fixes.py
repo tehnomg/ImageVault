@@ -65,15 +65,48 @@ def test_symlink_skip_default_no_missing(client, sample):
     assert data["total"] == 12
     assert all(i["scan_status"] != "missing" for i in data["items"])
 
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows case-insensitivity")
 def test_windows_case_insensitive_roots(client, sample):
     (sample / "Photos").mkdir()
     shutil.copyfile(sample / "solid.png", sample / "Photos" / "p.png")
-    vid = client.post("/api/volumes", json={"path": str(sample)}).json()["id"]
-    r1 = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": "photos"})
-    r2 = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": "PHOTOS"})
-    assert r1.status_code == 200 and r1.json()["id"] == r2.json()["id"]
-    client.post(f"/api/roots/{r1.json()['id']}/scan")
+
+    volume_response = client.post(
+        "/api/volumes",
+        json={"path": str(sample)},
+    )
+    assert volume_response.status_code == 200, volume_response.text
+
+    volume = volume_response.json()
+    vid = volume["id"]
+
+    base_rel = os.path.relpath(
+        os.path.realpath(sample),
+        os.path.realpath(volume["anchor"]),
+    ).replace("\\", "/")
+
+    if base_rel == ".":
+        base_rel = ""
+
+    photos_rel = f"{base_rel}/Photos".lstrip("/")
+
+    r1 = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": f"{base_rel}/photos".lstrip("/")},
+    )
+    r2 = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": photos_rel.upper()},
+    )
+
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+    assert r1.json()["id"] == r2.json()["id"]
+
+    r = client.post(f"/api/roots/{r1.json()['id']}/scan")
+    assert r.status_code == 200, r.text
+
     from tests.util import wait_idle
     wait_idle(client)
+
     assert find_image(client, "p.png")["scan_status"] == "ok"

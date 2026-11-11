@@ -25,29 +25,49 @@ def _exif_datetime(exif) -> str | None:
         pass
     return None
 
+
 def read_metadata(path: Path) -> tuple[dict | None, str | None]:
     """Метаданные без полного декодирования. Анимированный WebP — только первый кадр."""
     try:
         st = path.stat()
+
         with Image.open(path) as im:
             if getattr(im, "is_animated", False):
                 im.seek(0)
+
             exif = im.getexif()
             orientation = int(exif.get(274, 1) or 1)
             exif_json = json.dumps(
                 {EXIF_NAMES.get(k, str(k)): str(v)[:200]
-                 for k, v in exif.items() if k != 37500}, ensure_ascii=False)
+                 for k, v in exif.items() if k != 37500},
+                ensure_ascii=False,
+            )
             created = _exif_datetime(exif)
             if not created:
                 ts = st.st_ctime if os.name == "nt" else st.st_mtime
-                created = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-            meta = {"width": im.width, "height": im.height, "format": im.format,
-                    "mode": im.mode, "exif_json": exif_json,
-                    "orientation": orientation, "created_at_fs": created}
-            im.verify()
+                created = datetime.fromtimestamp(
+                    ts, tz=timezone.utc
+                ).isoformat()
+
+            meta = {
+                "width": im.width,
+                "height": im.height,
+                "format": im.format,
+                "mode": im.mode,
+                "exif_json": exif_json,
+                "orientation": orientation,
+                "created_at_fs": created,
+            }
+
+        # verify() must be the first operation on a freshly opened image.
+        with Image.open(path) as check:
+            check.verify()
+
         return meta, None
+
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
+
 
 def make_thumbnail(src: Path, dst: Path, size: int):
     dst.parent.mkdir(parents=True, exist_ok=True)
