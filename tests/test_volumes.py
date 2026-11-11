@@ -71,3 +71,109 @@ def test_rebind(client, sample):
     r = client.post(f"/api/volumes/{vid}/rebind", json={"path": str(sample)})
     assert r.status_code == 200 and r.json()["status"] == "online"
     assert client.get(f"/api/images/{img['id']}/original").status_code == 200
+
+def _volume_base_rel(client, sample):
+    response = client.post("/api/volumes", json={"path": str(sample)})
+    assert response.status_code == 200, response.text
+    volume = response.json()
+    base_rel = os.path.relpath(
+        os.path.realpath(sample),
+        os.path.realpath(volume["anchor"]),
+    ).replace("\\", "/")
+    return volume["id"], "" if base_rel == "." else base_rel.strip("/")
+
+
+def test_nested_root_rejected_when_parent_exists(client, sample):
+    vid, parent = _volume_base_rel(client, sample)
+    first = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": parent},
+    )
+    assert first.status_code == 200, first.text
+
+    child = f"{parent}/Photos".lstrip("/")
+    (sample / "Photos").mkdir()
+    response = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": child},
+    )
+    assert response.status_code == 409, response.text
+    assert "overlaps" in response.json()["message"]
+
+
+def test_parent_root_rejected_when_nested_root_exists(client, sample):
+    (sample / "Photos").mkdir()
+    vid, parent = _volume_base_rel(client, sample)
+    child = f"{parent}/Photos".lstrip("/")
+    first = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": child},
+    )
+    assert first.status_code == 200, first.text
+
+    response = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": parent},
+    )
+    assert response.status_code == 409, response.text
+
+
+def test_sibling_roots_and_prefix_names_are_allowed(client, sample):
+    (sample / "Photos").mkdir()
+    (sample / "Photos-old").mkdir()
+    vid, parent = _volume_base_rel(client, sample)
+    photos = f"{parent}/Photos".lstrip("/")
+    photos_old = f"{parent}/Photos-old".lstrip("/")
+
+    first = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": photos})
+    second = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": photos_old})
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["id"] != second.json()["id"]
+
+
+def test_exact_root_registration_remains_idempotent(client, sample):
+    vid, parent = _volume_base_rel(client, sample)
+    first = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": parent})
+    second = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": parent})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+
+
+def test_volume_root_overlaps_every_nested_root(client, sample):
+    (sample / "Photos").mkdir()
+    vid, parent = _volume_base_rel(client, sample)
+    child = f"{parent}/Photos".lstrip("/")
+    first = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": ""})
+    assert first.status_code == 200, first.text
+    response = client.post(f"/api/volumes/{vid}/roots", json={"relative_path": child})
+    assert response.status_code == 409, response.text
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows case-insensitivity")
+def test_nested_root_rejected_case_insensitively(client, sample):
+    (sample / "Photos" / "subfolder").mkdir(parents=True)
+    vid, parent = _volume_base_rel(client, sample)
+    first = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": f"{parent}/Photos".lstrip("/")},
+    )
+    assert first.status_code == 200, first.text
+    response = client.post(
+        f"/api/volumes/{vid}/roots",
+        json={"relative_path": f"{parent}/photos/subfolder".lstrip("/")},
+    )
+    assert response.status_code == 409, response.text
+
+
+
+def test_list_roots_passes_volume_id_to_repository(client, monkeypatch):
+    captured = {}
+
+    def fake_list_roots(conn, vid=None):
+        captured["vid"] = vid
+        return []
+
+    monkeypatch.setattr("services.catalog.repo.list_roots", fake_list_roots)
+    assert client.app.state.catalog.list_roots("volume-123") == []
+    assert captured["vid"] == "volume-123"
