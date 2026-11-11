@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>ImageVault</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+  <span class="logo">ImageVault</span>
+  <button data-tab="volumes" class="active">Volumes</button>
+  <button data-tab="gallery">Gallery</button>
+  <button data-tab="jobs">Jobs <span id="jobs-badge"></span></button>
+  <span class="spacer"></span>
+  <span id="status-line"></span>
+  <button id="logout" hidden>Logout</button>
+</nav>
+<section id="tab-volumes">
+  <div class="panel">
+    <h3>Зарегистрировать носитель / каталог</h3>
+    <input id="vol-path" placeholder="E:\ или E:\Images\References" size="50">
+    <label><input type="checkbox" id="vol-marker"> записать маркер в корень диска
+      (рекомендуется для сменных)</label>
+    <button id="vol-register">Register</button>
+  </div>
+  <div id="volumes-list"></div>
+</section>
+<section id="tab-gallery" hidden>
+  <div class="panel controls">
+    <select id="f-volume"><option value="">все диски</option></select>
+    <select id="f-status">
+      <option value="">все статусы</option>
+      <option value="ok">ok</option><option value="corrupt">corrupt</option>
+      <option value="missing">missing</option>
+    </select>
+    <input id="f-q" placeholder="имя файла…">
+    <select id="f-order">
+      <option value="name">по имени</option><option value="mtime">по дате изменения</option>
+      <option value="size">по размеру</option>
+    </select>
+    <button id="f-apply">Применить</button>
+    <span id="sel-count"></span>
+  </div>
+  <div id="grid"></div>
+  <div class="pager">
+    <button id="pg-prev">←</button><span id="pg-info"></span><button id="pg-next">→</button>
+  </div>
+</section>
+<section id="tab-jobs" hidden>
+  <div class="panel">
+    <button id="jobs-pause">Пауза очереди</button>
+    <button id="jobs-resume">Продолжить</button>
+    <span id="queue-state"></span>
+  </div>
+  <table id="jobs-table">
+    <thead><tr><th>kind</th><th>status</th><th>progress</th><th>message / error</th>
+    <th>created</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+<div id="viewer" hidden>
+  <div id="viewer-img-wrap"><img id="viewer-img" alt=""></div>
+  <aside id="viewer-info">
+    <button id="viewer-close">✕ (Esc)</button>
+    <div id="viewer-meta"></div>
+  </aside>
+  <button id="viewer-prev" class="vnav">‹</button>
+  <button id="viewer-next" class="vnav">›</button>
+</div>
+<div id="login" hidden>
+  <form id="login-form" class="login-box">
+    <h3>ImageVault — вход</h3>
+    <p class="muted">Токен напечатан в консоли сервера при запуске в LAN-режиме
+      (или: python app.py --show-token).</p>
+    <input id="login-token" type="password" autocomplete="current-password"
+           placeholder="access token">
+    <button type="submit">Войти</button>
+    <div id="login-error" class="err"></div>
+  </form>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
