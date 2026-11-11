@@ -55,12 +55,13 @@ def scan_root(db, cfg, volume: dict, root: dict, ctx) -> dict:
                 continue
             attrs = getattr(st, "st_file_attributes", 0)
             is_reparse = bool(attrs & REPARSE)
+            is_symlink = entry.is_symlink()
             if is_reparse and not follow:
                 if entry.is_dir(follow_symlinks=False):
                     skipped_dirs.append(rel_of(entry.path))
                 continue
             try:
-                st_eff = os.stat(entry.path) if is_reparse else st
+                st_eff = os.stat(entry.path) if (is_reparse or is_symlink) else st
                 is_dir = entry.is_dir(follow_symlinks=follow)
                 is_file = entry.is_file(follow_symlinks=follow)
             except FileNotFoundError:
