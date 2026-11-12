@@ -1,3 +1,11 @@
+> **Implementation status — target architecture, not current behavior**
+>
+> This document records agreed target architecture and future design decisions. It is not proof that the described features exist in the current source tree.
+>
+> The current application remains a single-catalog, single-SQLite-database implementation. Multiple catalogs/databases, a global volume registry and scheduler, video/contact-sheet processing, duplicate search, AI analysis/tagging, and MCP integration must be treated as planned until independently verified in source code and tests.
+>
+> Database tables, schema fields, design notes, or roadmap entries do not by themselves establish an operational workflow. Use README.md, docs/ARCHITECTURE.md, docs/PROJECT_MAP.md, and current tests to understand what is implemented.
+
 # Architecture Addendum — ImageVault
 
 **Статус:** согласованные архитектурные решения для следующих этапов; это проектное дополнение, а не описание уже реализованного кода.  

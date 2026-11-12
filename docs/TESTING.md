@@ -36,3 +36,19 @@
 - ручной сценарий и LAN-сценарий пройдены;
 - смена буквы диска восстановлена на реальном сменном носителе.
 Только после этого этап переводится в READY. Этап 2 — после явной приёмки.
+
+## 4. Interpretation of test results
+
+Automated tests use synthetic data and temporary directories. A passing suite proves only the scenarios explicitly exercised by those tests.
+
+A passing automated suite does not by itself verify:
+- behavior on every Windows filesystem;
+- real removable-drive identity after drive-letter changes;
+- behavior with every USB enclosure or storage controller;
+- recovery from physical disk disconnection during active writes;
+- performance and stability on large real-world image archives;
+- safe operation with multiple simultaneously running application processes.
+
+Report Windows-only tests separately from tests skipped on other platforms. Distinguish automated tests from manual acceptance scenarios. A manual scenario is completed only after it has actually been performed.
+
+Historical test counts in reports refer to the test tree at the time of the report. They are not current test-suite totals.
